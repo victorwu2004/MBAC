@@ -1,0 +1,87 @@
+Since you're working with a **CMS Feed Ingestor**, security and stability are paramount—especially if this is handling medical or government data. 
+
+To run this as a **rootless Podman container**, we will ensure the process inside the container runs as a non-privileged user. This way, even if the container is compromised, the attacker still has no root access to your host machine.
+
+### 1. The `requirements.txt`
+This includes the standard stack for a robust ingestion engine (AWS SDK for S3, EDI parsing, and logging).
+
+```text
+boto3>=1.34.0
+pandas>=2.2.0
+python-dotenv>=1.0.1
+pydantic>=2.6.0
+# Add your EDI/Edifecs specific python bindings if applicable
+# edifecs-python-sdk
+```
+
+---
+
+### 2. The `Containerfile` (Dockerfile)
+We will use a slim Python base and immediately switch to a non-root user (`appuser`).
+
+```dockerfile
+# Use a secure, slim base image
+FROM python:3.11-slim
+
+# Set environment variables for Python stability
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_HOME=/home/appuser/app
+
+# Create a non-root user and set up directory
+RUN groupadd -r appgroup && useradd -r -g appgroup -m -d /home/appuser appuser
+WORKDIR $APP_HOME
+
+# Install dependencies as root, then clean up
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the ingestion script and change ownership
+COPY cms_feed_ingestor.py .
+RUN chown -R appuser:appgroup $APP_HOME
+
+# Switch to the non-root user
+USER appuser
+
+# Run the ingestor
+CMD ["python", "cms_feed_ingestor.py"]
+```
+
+---
+
+### 3. The Podman Commands (Rootless)
+Because you are running rootless, you don't need `sudo`. We will use the `:Z` flag on volumes to handle **SELinux** labeling automatically—crucial if you are running on RHEL, Fedora, or AlmaLinux.
+
+#### Build the image:
+```bash
+podman build -t cms-ingestor:latest .
+```
+
+#### Run the container:
+```bash
+podman run -d \
+  --name cms-feed-ingestor \
+  --user appuser \
+  --security-opt label=disable \
+  -v ./data/incoming:/home/appuser/app/incoming:Z \
+  -v ./logs:/home/appuser/app/logs:Z \
+  -e AWS_ACCESS_KEY_ID="your_key" \
+  -e AWS_SECRET_ACCESS_KEY="your_secret" \
+  -e S3_BUCKET_NAME="medical-ai-copilot-phi-prod" \
+  cms-ingestor:latest
+```
+
+### Key DevOps Features:
+* **`--user appuser`**: Explicitly tells Podman to use our unprivileged user.
+* **`:Z` volume flag**: In a rootless environment, this relabels the host files so the container user can actually read/write to them without `chmod 777` nightmares.
+* **Environment Variables**: Instead of hardcoding credentials, pass them at runtime (or use a `.env` file with `--env-file`).
+
+**Would you like me to help you wrap this into a `systemd` unit file so the ingestor starts automatically whenever your host reboots?**
+
+
+
+install podman desktop
+in order to run desktop need belows steps:
+dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+
+https://learn.microsoft.com/en-us/windows/wsl/install-manual#step-3---enable-virtual-machine-feature

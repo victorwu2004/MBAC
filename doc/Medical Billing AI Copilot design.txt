@@ -1,0 +1,352 @@
+Here's a comprehensive architectural plan for your **Medical Billing AI Copilot** built in Python and deployed on AWS, designed to integrate with your existing Edifecs translator layer.
+
+---
+
+## 🏗️ System Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Medical Billing AI Copilot                   │
+├──────────────┬──────────────────────────────┬───────────────────┤
+│  Data Layer  │      Intelligence Layer      │  Integration Layer│
+│  (ICD-10 /  │  (Claude AI + RAG + Rules)   │  (Edifecs X12     │
+│  CPT Feeds)  │                              │   837/835 Bridge) │
+└──────────────┴──────────────────────────────┴───────────────────┘
+```
+
+---
+
+## Phase 1: Data Foundation — ICD-10 & Procedure Code Retrieval
+
+### Sources & Ingestion
+
+| Source | What It Provides | Update Frequency |
+|---|---|---|
+| **CMS ICD-10-CM** | Diagnosis codes, descriptions | Annual (Oct 1) |
+| **CMS ICD-10-PCS** | Inpatient procedure codes | Annual (Oct 1) |
+**AMA CPT** | Professional procedure codes | Annual (Jan 1) |
+| **CMS HCPCS Level II** | DME, drugs, non-physician codes | Quarterly |
+| **CMS LCD/NCD** | Coverage determinations | Rolling |
+
+### Python Ingestion Pipeline
+
+```python
+# cms_feed_ingestor.py
+import httpx
+import zipfile
+import pandas as pd
+from pathlib import Path
+
+CMS_ICD10_URL = "https://www.cms.gov/medicare/coding-billing/icd-10-codes"
+HCPCS_URL    = "https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system"
+
+class CMSCodeFeedIngestor:
+    """Downloads, extracts, and normalizes CMS code files."""
+
+    def __init__(self, s3_client, bucket: str):
+        self.s3 = s3_client
+        self.bucket = bucket
+
+    async def fetch_icd10_cm(self, fiscal_year: str) -> pd.DataFrame:
+        url = f"https://www.cms.gov/files/zip/FY{fiscal_year}-April-Update-Code-Descriptions-in-Tabular-Order.zip"
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, follow_redirects=True)
+        # Extract, parse fixed-width or delimited code file
+        return self._parse_icd10_flat(r.content)
+
+    def _parse_icd10_flat(self, content: bytes) -> pd.DataFrame:
+        # CMS distributes as fixed-width; normalize to code, description, category
+        ...
+
+    def upload_to_s3(self, df: pd.DataFrame, key: str):
+        parquet_buf = df.to_parquet()
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=parquet_buf)
+```
+
+**Trigger this pipeline** via EventBridge Scheduler on Oct 1 and Jan 1 each year, with SNS alerts on failure.
+
+---
+
+## Phase 2: Claim Verification Engine
+
+### Claim Validation Logic (Rule Layers)
+
+```
+Layer 1 - Structural Validation   → EDI 837 schema checks (via Edifecs)
+Layer 2 - Code Validity           → ICD-10/CPT exist in current year's table
+Layer 3 - Medical Necessity       → Diagnosis ↔ Procedure pairing rules (LCD/NCD)
+Layer 4 - Payer Policy Rules      → Payer-specific edits (loaded from config)
+Layer 5 - AI Copilot Analysis     → Claude-powered narrative reasoning & suggestion
+```
+
+```python
+# claim_verifier.py
+from dataclasses import dataclass
+from typing import Optional
+import boto3
+
+@dataclass
+class ClaimLine:
+    cpt_code: str
+    icd10_codes: list[str]
+    units: int
+    modifier: Optional[str]
+    service_date: str
+
+@dataclass
+class VerificationResult:
+    status: str            # VALID | WARNING | DENIED_LIKELY | ERROR
+    errors: list[str]
+    warnings: list[str]
+    ai_narrative: str      # Claude explanation
+    suggested_codes: list[str]
+
+class ClaimVerifier:
+    def __init__(self, code_store, ai_client, rules_engine):
+        self.codes = code_store        # DynamoDB or RDS lookup
+        self.ai = ai_client            # Bedrock / Anthropic
+        self.rules = rules_engine
+
+    def verify(self, claim: dict) -> VerificationResult:
+        errors, warnings = [], []
+
+        for line in claim["lines"]:
+            # Layer 2: Code validity
+            if not self.codes.is_valid_cpt(line.cpt_code, line.service_date):
+                errors.append(f"CPT {line.cpt_code} invalid for DOS {line.service_date}")
+
+            for dx in line.icd10_codes:
+                if not self.codes.is_valid_icd10(dx, line.service_date):
+                    errors.append(f"ICD-10 {dx} invalid or not in scope")
+
+            # Layer 3: Medical necessity
+            necessity = self.rules.check_necessity(line.cpt_code, line.icd10_codes)
+            if not necessity.passes:
+                warnings.append(necessity.reason)
+
+        # Layer 5: AI narrative
+        narrative = self.ai.analyze_claim(claim, errors, warnings)
+
+        return VerificationResult(
+            status="VALID" if not errors else "ERROR",
+            errors=errors,
+            warnings=warnings,
+            ai_narrative=narrative,
+            suggested_codes=narrative.get("suggestions", [])
+        )
+```
+
+### AI Copilot — Bedrock Integration
+
+```python
+# ai_copilot.py
+import boto3, json
+
+class BillingCopilot:
+    def __init__(self, model_id="anthropic.claude-sonnet-4-5"):
+        self.bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+        self.model_id = model_id
+
+    def analyze_claim(self, claim: dict, errors: list, warnings: list) -> dict:
+        prompt = self._build_prompt(claim, errors, warnings)
+        response = self.bedrock.invoke_model(
+            modelId=self.model_id,
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": prompt}]
+            })
+        )
+        return json.loads(response["body"].read())
+
+    def _build_prompt(self, claim, errors, warnings) -> str:
+        return f"""
+You are a certified medical billing expert. Review this claim:
+
+CLAIM: {json.dumps(claim, indent=2)}
+ERRORS: {errors}
+WARNINGS: {warnings}
+
+Provide:
+1. Plain-language explanation of any issues
+2. Suggested ICD-10/CPT code corrections with rationale
+3. Likelihood of payer acceptance (High/Medium/Low)
+4. Recommended next actions
+
+Respond as JSON: {{"narrative": "", "suggestions": [], "acceptance_likelihood": "", "actions": []}}
+"""
+```
+
+---
+
+## Phase 3: Edifecs Integration Bridge
+
+```python
+# edifecs_bridge.py
+# Your Edifecs translator already produces parsed X12 dicts.
+# This bridge maps those to ClaimLine objects for the verifier.
+
+class EdifecsBridge:
+    def x12_837_to_claim(self, edifecs_output: dict) -> dict:
+        """Convert Edifecs-parsed 837P/I to internal claim format."""
+        claim = {
+            "payer_id": edifecs_output["loop2010BB"]["NM109"],
+            "patient_id": edifecs_output["loop2010CA"]["NM109"],
+            "lines": []
+        }
+        for sv in edifecs_output.get("loop2400", []):
+            claim["lines"].append(ClaimLine(
+                cpt_code=sv["SV101"][1],           # CPT in SV1-02
+                icd10_codes=self._map_dx_pointers(sv, edifecs_output),
+                units=float(sv["SV104"]),
+                modifier=sv["SV101"][2] if len(sv["SV101"]) > 2 else None,
+                service_date=sv["DTP03"]
+            ))
+        return claim
+
+    def verification_to_999(self, result: VerificationResult) -> str:
+        """Optionally wrap result back as X12 999 acknowledgement."""
+        ...
+```
+
+---
+
+## Phase 4: AWS Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  AWS Account — Medical Billing AI Copilot                   │
+│                                                             │
+│  ┌──────────┐    ┌─────────────────┐    ┌───────────────┐  │
+│  │API Gateway│───▶│  Lambda / ECS   │───▶│  Bedrock      │  │
+│  │(REST/WS) │    │  (FastAPI app)  │    │  (Claude)     │  │
+│  └──────────┘    └────────┬────────┘    └───────────────┘  │
+│                           │                                 │
+│              ┌────────────┼──────────────┐                  │
+│              ▼            ▼              ▼                  │
+│         ┌────────┐  ┌──────────┐  ┌──────────┐             │
+│         │DynamoDB│  │ RDS      │  │  S3      │             │
+│         │(code   │  │(claims   │  │(ICD-10   │             │
+│         │ cache) │  │ audit)   │  │ parquet) │             │
+│         └────────┘  └──────────┘  └──────────┘             │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  EventBridge → Lambda → CMS Feed Ingestor → S3/DDB  │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌────────────┐    ┌──────────────┐    ┌─────────────────┐  │
+│  │  Secrets   │    │  CloudWatch  │    │  WAF + Shield   │  │
+│  │  Manager   │    │  + X-Ray     │    │  (HIPAA perimeter│ │
+│  └────────────┘    └──────────────┘    └─────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Service Breakdown
+
+| Component | AWS Service | Why |
+|---|---|---|
+| API Layer | API Gateway + Lambda (or ECS Fargate) | Serverless-first; Fargate if >15min jobs |
+| AI Engine | **Amazon Bedrock (Claude Sonnet)** | HIPAA eligible, no data leaves AWS |
+| Code Reference Store | **DynamoDB** | Sub-ms ICD-10/CPT lookups by code+year |
+| Code Source Files | **S3** (Parquet via Athena) | CMS bulk files, queryable cheaply |
+| Claims Audit DB | **RDS Aurora PostgreSQL** | Relational claims history, audit trail |
+| Feed Scheduler | **EventBridge Scheduler** | Annual CMS update triggers |
+| Secrets | **Secrets Manager** | AMA CPT license keys, payer credentials |
+| Observability | **CloudWatch + X-Ray** | Latency tracing per claim line |
+| HIPAA Perimeter | **VPC + WAF + Shield Standard** | PHI data isolation |
+
+### FastAPI App Structure
+
+```
+copilot/
+├── app/
+│   ├── main.py               # FastAPI entrypoint
+│   ├── routers/
+│   │   ├── claims.py         # POST /verify-claim
+│   │   ├── codes.py          # GET /codes/icd10, /codes/cpt
+│   │   └── copilot.py        # POST /copilot/explain
+│   ├── services/
+│   │   ├── claim_verifier.py
+│   │   ├── ai_copilot.py
+│   │   ├── code_store.py
+│   │   └── edifecs_bridge.py
+│   └── ingestors/
+│       └── cms_feed_ingestor.py
+├── infrastructure/
+│   ├── cdk/                  # AWS CDK (Python) stacks
+│   │   ├── app.py
+│   │   ├── api_stack.py
+│   │   ├── data_stack.py
+│   │   └── scheduler_stack.py
+│   └── Dockerfile
+├── tests/
+└── requirements.txt
+```
+
+### CDK Deployment Snippet
+
+```python
+# infrastructure/cdk/api_stack.py
+from aws_cdk import (Stack, aws_lambda as lambda_, aws_apigateway as apigw,
+                     aws_dynamodb as ddb, aws_iam as iam)
+
+class CopilotApiStack(Stack):
+    def __init__(self, scope, id, **kwargs):
+        super().__init__(scope, id, **kwargs)
+
+        # DynamoDB for code lookups
+        code_table = ddb.Table(self, "ICD10CodeTable",
+            partition_key=ddb.Attribute(name="code", type=ddb.AttributeType.STRING),
+            sort_key=ddb.Attribute(name="fiscal_year", type=ddb.AttributeType.STRING),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+        )
+
+        # Lambda function
+        fn = lambda_.DockerImageFunction(self, "CopilotFn",
+            code=lambda_.DockerImageCode.from_image_asset("../"),
+            memory_size=1024,
+            timeout=Duration.seconds(30),
+        )
+
+        # Grant Bedrock access
+        fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=["arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*"]
+        ))
+        code_table.grant_read_data(fn)
+
+        # API Gateway
+        api = apigw.LambdaRestApi(self, "CopilotApi", handler=fn)
+```
+
+---
+
+## Phase 5: HIPAA Compliance Checkpoints
+
+- **Bedrock** — HIPAA eligible service; execute a BAA with AWS
+- **All S3 buckets** — Server-side encryption (SSE-KMS), no public access
+- **RDS Aurora** — Encrypted at rest, in a private subnet, no public endpoint
+- **API Gateway** — TLS 1.2+ only, WAF rules blocking OWASP Top 10
+- **CloudTrail** — All API calls logged for audit
+- **Secrets Manager** — Rotate credentials; never hardcode PHI or keys
+- **VPC Flow Logs** — Network-level audit trail
+
+---
+
+## Rollout Roadmap
+
+```
+Week 1-2:  CMS feed ingestor → S3 + DynamoDB load
+Week 3-4:  Claim verifier (layers 1-4, no AI yet) + unit tests
+Week 5-6:  Edifecs bridge integration + 837P/I parsing validation
+Week 7-8:  Bedrock/Claude copilot integration + prompt tuning
+Week 9-10: FastAPI app + CDK stacks + dev environment deploy
+Week 11:   HIPAA audit, pen test, CloudWatch dashboards
+Week 12:   Prod deploy + runbook + on-call alerts
+```
+
+---
+
+The key architectural decisions here are: **Bedrock over direct Anthropic API** (HIPAA eligibility + stays in your AWS VPC), **DynamoDB for hot code lookups** (sub-5ms for real-time claim scrubbing), and **EventBridge-driven CMS ingestion** so your code tables are always current without manual ops. Your Edifecs translator slots in cleanly as the upstream parser before the verification engine takes over.
+
+Want me to go deeper on any specific layer — the CDK infrastructure, the DynamoDB schema for ICD-10, the Bedrock prompt engineering, or the Edifecs bridge mapping?
