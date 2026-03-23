@@ -5,6 +5,7 @@ from pathlib import Path
 
 CMS_ICD10_URL = "https://www.cms.gov/medicare/coding-billing/icd-10-codes"
 HCPCS_URL    = "https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system"
+HCPCS_UPDATE_URL = "https://www.cms.gov/medicare/coding-billing/healthcare-common-procedure-system/quarterly-update"
 
 class CMSCodeFeedIngestor:
     """Downloads, extracts, and normalizes CMS code files."""

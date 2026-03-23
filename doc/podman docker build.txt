@@ -78,10 +78,55 @@ podman run -d \
 
 **Would you like me to help you wrap this into a `systemd` unit file so the ingestor starts automatically whenever your host reboots?**
 
+https://github.com/fedora-cloud/docker-brew-fedora/blob/45/x86_64/fedora-20260322.tar
 
+G:\My Drive\vtech\podman
 
 install podman desktop
 in order to run desktop need belows steps:
 dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 
+needs to reboot the machine anyway
+
 https://learn.microsoft.com/en-us/windows/wsl/install-manual#step-3---enable-virtual-machine-feature
+
+
+WSL version should be >= 1.2.5.
+Call 'wsl --update' and 'wsl.exe --version' in a terminal to check your wsl version.
+
+
+$ wsl --update
+Installing: Windows Subsystem for Linux
+Windows Subsystem for Linux has been installed.
+needs to reboot the machine again
+victo@vnewtech2021 MINGW64 ~
+$ wsl.exe --version
+WSL version: 2.6.3.0
+Kernel version: 6.6.87.2-1
+WSLg version: 1.0.71
+MSRDC version: 1.2.6353
+Direct3D version: 1.611.1-81528511
+DXCore version: 10.0.26100.1-240331-1435.ge-release
+Windows version: 10.0.19045.6466
+
+C:\Users\victo\WSL
+wsl --import Fedora "$env:USERPROFILE\WSL\Fedora" "$env:TEMP\fedora.tar.xz"
+
+wsl --import Fedora "$env:USERPROFILE\WSL\Fedora" "$env:TEMP\fedora.tar.xz"
+W S L 2   i s   n o t   s u p p o r t e d   w i t h   y o u r   c u r r e n t   m a c h i n e   c o n f i g u r a t i o n . 
+ 
+ P l e a s e   e n a b l e   t h e   " V i r t u a l   M a c h i n e   P l a t f o r m "   o p t i o n a l   c o m p o n e n t   a n d   e n s u r e   v i r t u a l i z a t i o n   i s   e n a
+ b l e d   i n   t h e   B I O S . 
+ 
+ E n a b l e   " V i r t u a l   M a c h i n e   P l a t f o r m "   b y   r u n n i n g :   w s l . e x e   - - i n s t a l l   - - n o - d i s t r i b u t i o n 
+ 
+ F o r   i n f o r m a t i o n   p l e a s e   v i s i t   h t t p s : / / a k a . m s / e n a b l e v i r t u a l i z a t i o n 
+ 
+ E r r o r   c o d e :   W s l / S e r v i c e / R e g i s t e r D i s t r o / C r e a t e V m / H C S / H C S _ E _ H Y P E R V _ N O T _ I N S T A L L E D 
+ 
+ python.exe -m pip install --upgrade pip
+ pip install -r requirements.txt
+ 
+ pip install httpx
+ 
+ python cms_feed_ingestor.py
